@@ -1,6 +1,6 @@
 {
   "name": "ledger-zkir-explorer",
-  "version": "0.3.8",
+  "version": "0.3.11",
   "private": true,
   "type": "module",
   "scripts": {
@@ -26,10 +26,6 @@
   "icon": "extension/logo.png",
   "description": "Inspect and compare Midnight ZKIR circuits locally.",
   "publisher": "local-zkir",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/Minhcardanian/cirsie.git"
-  },
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -61,8 +57,20 @@
         "title": "ZKIR Explorer: Load Example Baseline"
       },
       {
+        "command": "zkirExplorer.complexExample",
+        "title": "ZKIR Explorer: Load Complex Example"
+      },
+      {
         "command": "zkirExplorer.graph",
         "title": "ZKIR Explorer: Show Dependency Graph"
+      },
+      {
+        "command": "zkirExplorer.exportJson",
+        "title": "ZKIR Explorer: Export Analysis JSON"
+      },
+      {
+        "command": "zkirExplorer.exportMarkdown",
+        "title": "ZKIR Explorer: Export Comparison Markdown"
       }
     ],
     "viewsContainers": {
@@ -85,7 +93,7 @@
     "viewsWelcome": [
       {
         "view": "zkirExplorerView",
-        "contents": "Open a ZKIR circuit to inspect its instructions.\n[Open baseline](command:zkirExplorer.open)\n[Load example](command:zkirExplorer.examples)"
+        "contents": "Open a ZKIR circuit to inspect its instructions.\n[Open baseline](command:zkirExplorer.open)\n[Load example](command:zkirExplorer.examples)\n[Load complex example](command:zkirExplorer.complexExample)"
       }
     ],
     "menus": {
@@ -113,6 +121,28 @@
           "group": "navigation"
         }
       ]
+    },
+    "configuration": {
+      "title": "ZKIR Explorer",
+      "properties": {
+        "zkirExplorer.maxArtifactBytes": {
+          "type": "integer",
+          "default": 4194304,
+          "minimum": 1024,
+          "maximum": 16777216,
+          "scope": "application",
+          "description": "Maximum size in bytes of an imported ZKIR artifact."
+        }
+      }
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Minhcardanian/cirsie.git"
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true
     }
   }
 }

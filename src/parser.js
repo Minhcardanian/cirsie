@@ -1,46 +1,262 @@
-// Based on the Ledger 9 release-candidate ZKIR v3.0 instruction definitions.
-// Operand fields from midnight-zkir 3.2.1 (Ledger 9.1.0.2). This is a
-// structural decoder, not the official type checker or circuit verifier.
-const fields = {
- encode:['input'], decode:['inputs'], assert:['cond'], cond_select:['bit','a','b'],
- constrain_bits:['val'], constrain_eq:['a','b'], constrain_to_boolean:['val'], copy:['val'],
- impact:['guard','inputs'], ec_mul:['a','scalar'], ec_mul_generator:['scalar'], hash_to_curve:['inputs'],
- into_coordinates:['point'], from_coordinates:['inputs'], into_bytes32:['input'], from_bytes32:['bytes'],
- reverse_bytes:['bytes'], bytes32_into_low_high:['bytes'], bytes32_from_low_high:['inputs'],
- div_mod_power_of_two:['val'], reconstitute_field:['divisor','modulus'], transient_hash:['inputs'],
- persistent_hash:['inputs'], keccak256:['inputs'], test_eq:['a','b'], add:['a','b'], mul:['a','b'],
- neg:['a'], inv:['a'], not:['a'], less_than:['a','b'], jubjub_scalar_from_native:['native'],
- public_input:['guard'], private_input:['guard'], output:['vals'], slice:['bytes'], nth:['bytes'],
- concat:['inputs'], load_constant:[], sha512:['inputs'], and:['inputs'], or:['inputs'], xor:['inputs'],
- to_bytes:['input'], from_bytes:['bytes'], reverse:['bytes'], bytes_into_natives:['bytes'], bytes_from_natives:['inputs']
-};
-export function operandFields(op) { return fields[op] ?? null; }
-export function parse(text) {
- let data; try { data=JSON.parse(text); } catch { throw Error('Invalid JSON. Choose a text .zkir file.'); }
- if (data?.version?.major === 2 && data.version.minor === 0) {
-  if (!Number.isInteger(data.num_inputs) || data.num_inputs < 0 || !Array.isArray(data.instructions) || typeof data.do_communications_commitment !== 'boolean' || data.instructions.some(x => !x || typeof x.op !== 'string')) throw Error('Invalid ZKIR 2.0 circuit.');
-  const schema = {assert:[['cond'],0],cond_select:[['bit','a','b'],1],constrain_bits:[['var'],0],constrain_eq:[['a','b'],0],constrain_to_boolean:[['var'],0],copy:[['var'],1],declare_pub_input:[['var'],0],pi_skip:[['guard'],0],ec_add:[['a_x','a_y','b_x','b_y'],2],ec_mul:[['a_x','a_y','scalar'],2],ec_mul_generator:[['scalar'],2],hash_to_curve:[['inputs'],2],load_imm:[[],1],div_mod_power_of_two:[['var'],2],reconstitute_field:[['divisor','modulus'],1],output:[['var'],0],transient_hash:[['inputs'],1],persistent_hash:[['inputs'],2],test_eq:[['a','b'],1],add:[['a','b'],1],mul:[['a','b'],1],neg:[['a'],1],not:[['a'],1],less_than:[['a','b'],1],public_input:[['guard'],1],private_input:[['guard'],1]};
-  const memory=Array.from({length:data.num_inputs},(_,i)=>`input:${i}`), edges=[], warnings=[];
-  for (const [i,ins] of data.instructions.entries()) {
-   const rule=schema[ins.op]; if(!rule){warnings.push(`Instruction ${i}: unknown opcode ${ins.op}; subsequent memory indices cannot be decoded.`);break;}
-   for(const field of rule[0]) for(const value of (Array.isArray(ins[field])?ins[field]:[ins[field]])) {
-    if(value==null) continue;
-    if(!Number.isInteger(value) || value<0 || value>=memory.length) {warnings.push(`Instruction ${i}: invalid memory index ${value} in ${field}.`);continue;}
-    edges.push({source:memory[value],target:String(i),label:`${field}: [${value}]`});
-   }
-   for(let j=0;j<rule[1];j++) memory.push(String(i));
+import {schemas, signatureSchema30} from './schema.js';
+
+export const limits = Object.freeze({
+  artifactBytes: 4 * 1024 * 1024,
+  instructions: 20_000,
+  signatureItems: 10_000,
+  entriesPerInstruction: 512,
+  instructionBytes: 16 * 1024,
+  edges: 60_000,
+  jsonValues: 250_000,
+  jsonDepth: 40,
+});
+
+export class ArtifactError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = 'ArtifactError';
+    this.code = code;
   }
-  return {data: {...data, inputs: Array.from({length:data.num_inputs}, (_,i)=>({name: `input ${i}`})), outputs: []}, edges, warnings};
- }
- if (!data || data.version?.major !== 3 || ![0,1].includes(data.version?.minor)) throw Error('Unsupported ZKIR version. Supported: 2.0, 3.0 and 3.1 (preview).');
- if (!Array.isArray(data.instructions) || !Array.isArray(data.inputs) || !Array.isArray(data.outputs) || typeof data.do_communications_commitment !== 'boolean') throw Error('Invalid circuit: inputs, outputs, instructions or commitment flag missing.');
- const producers=new Map(); const warnings=[]; const edges=[];
- for(const input of data.inputs) { if(typeof input?.name !== 'string') throw Error('Invalid typed input.'); producers.set(input.name, 'input:'+input.name); }
- data.instructions.forEach((inst,i)=>{
-  if(!inst || typeof inst.op !== 'string') throw Error(`Instruction ${i} has no opcode.`);
-  if(!Object.hasOwn(fields,inst.op)) { warnings.push(`Instruction ${i}: unsupported opcode ${inst.op}; dependencies may be incomplete.`); return; }
-  for(const field of fields[inst.op]) { const val=inst[field]; for(const v of (Array.isArray(val)?val:[val])) { if(v == null && field === 'guard') continue; if(typeof v !== 'string') { warnings.push(`Instruction ${i}: invalid operand in ${field}.`); continue; } if (/^-?0x[0-9a-f]+$/i.test(v)) continue; const src=producers.get(v); if(src) edges.push({source:src,target:String(i),label:v,field}); else warnings.push(`Instruction ${i}: unresolved identifier ${v} in ${field}.`); } }
-  const outs=[...(typeof inst.output==='string'?[inst.output]:[]),...(Array.isArray(inst.outputs)?inst.outputs:[])]; for(const out of outs) { if(typeof out !== 'string') { warnings.push(`Instruction ${i}: invalid output identifier.`); continue; } if(producers.has(out)) warnings.push(`Instruction ${i}: duplicate identifier ${out}.`); producers.set(out,String(i)); }
- });
- return {data,edges,warnings};
+}
+
+export function checkArtifactSize(bytes, maximum = limits.artifactBytes) {
+  if (bytes > maximum) {
+    throw new ArtifactError('limit_exceeded',
+      `File is ${bytes} bytes. The configured limit is ${maximum} bytes.`);
+  }
+}
+
+const invalid = message => new ArtifactError('invalid_input', message);
+const exceeded = (what, maximum) => new ArtifactError('limit_exceeded',
+  `Artifact exceeds the ${what} limit (${maximum}).`);
+const encoder = new TextEncoder();
+const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+const specs = fields => fields ? fields.split(' ') : [];
+const fieldName = spec => spec.replace(/\[.*\]|\?$/, '');
+const isName = value => typeof value === 'string' && value.startsWith('%') && value.length > 1;
+const isHex = value => /^-?0x(?:[0-9a-f]{2})+$/i.test(value);
+const isLegacyHex = value => /^-?(?:[0-9a-f]{2})+$/i.test(value);
+const unsignedFields = new Set(['bits', 'count', 'start', 'len', 'index']);
+
+function inspectJson(value, depth = 0, budget = {values: 0}) {
+  if (++budget.values > limits.jsonValues) throw exceeded('JSON value count', limits.jsonValues);
+  if (depth > limits.jsonDepth) throw exceeded('JSON depth', limits.jsonDepth);
+  if (typeof value === 'number' && (!Number.isFinite(value) ||
+      (Number.isInteger(value) && !Number.isSafeInteger(value)))) {
+    throw invalid('A JSON number is outside the safely representable range.');
+  }
+  if (value && typeof value === 'object') {
+    for (const child of Object.values(value)) inspectJson(child, depth + 1, budget);
+  }
+}
+
+function readField(instruction, spec, warn, read) {
+  const field = fieldName(spec);
+  const value = instruction[field];
+  if (value == null && spec.endsWith('?')) return;
+  const list = spec.includes('[');
+  if (Array.isArray(value) !== list || (spec.endsWith('[2]') && value.length !== 2)) {
+    warn('invalid_operand_shape', field, `invalid field shape in ${field}.`);
+    return;
+  }
+  if (list) value.forEach((entry, index) => read(entry, field, index));
+  else read(value, field);
+}
+
+/**
+ * @typedef {{field: string, element?: number, value: any, kind: string, issue?: string, producer?: string}} Operand
+ * @typedef {{index: number, opcode: string, raw: Record<string, any>, operands: Operand[],
+ *   definitions: (string|number)[], known: boolean, decoded?: boolean}} Instruction
+ */
+
+/** @returns {Instruction} */
+function inspectInstruction(instruction, index, indexed, schema, diagnose) {
+  const operands = [], definitions = [];
+  const warn = (code, field, message) => diagnose(code, message, index, field);
+  const opcode = instruction.op;
+  const known = Object.hasOwn(schema.instructions, opcode);
+  if (!known) {
+    warn('unknown_opcode', 'op', indexed
+      ? 'unknown opcode; subsequent memory indices cannot be decoded.'
+      : 'unsupported opcode; dependencies may be incomplete.');
+    return {index, opcode, raw: instruction, operands, definitions, known};
+  }
+
+  const [operandSpecs, definitionSpecs, metadataSpecs] = schema.instructions[opcode];
+  const operandList = specs(operandSpecs);
+  const definitionList = indexed ? [] : specs(definitionSpecs);
+  const metadata = specs(metadataSpecs);
+  const expected = new Set(['op', ...operandList.map(fieldName), ...definitionList.map(fieldName), ...metadata]);
+  for (const field of Object.keys(instruction)) {
+    if (!expected.has(field)) warn('unknown_field', field, 'unrecognized instruction field.');
+  }
+  for (const field of metadata) {
+    const value = instruction[field];
+    if (!Object.hasOwn(instruction, field)) {
+      warn('missing_field', field, 'missing instruction field.');
+    } else if ((unsignedFields.has(field) && (!Number.isInteger(value) || value < 0 || value > 0xffffffff)) ||
+               (field === 'type' && typeof value !== 'string') ||
+               (field === 'alignment' && !Array.isArray(value))) {
+      warn('invalid_field', field, 'invalid instruction field.');
+    }
+  }
+
+  for (const spec of operandList) {
+    readField(instruction, spec, warn, (value, field, element) => {
+      const kind = indexed
+        ? (Number.isSafeInteger(value) && value >= 0 ? 'memory_index' : 'invalid')
+        : (isName(value) ? 'identifier' : typeof value === 'string' && isHex(value) ? 'constant' : 'invalid');
+      operands.push({field, ...(element === undefined ? {} : {element}), value: value ?? null, kind});
+      if (kind === 'invalid') warn('invalid_operand', field, `invalid operand in ${field}.`);
+    });
+  }
+  const literalField = opcode === 'load_imm' ? 'imm' : opcode === 'load_constant' ? 'encoding[]' : null;
+  if (literalField) {
+    readField(instruction, literalField, warn, (value, field, element) => {
+      const valid = typeof value === 'string' && (indexed ? isLegacyHex(value) : isHex(value));
+      operands.push({field, ...(element === undefined ? {} : {element}),
+        value: value ?? null, kind: valid ? 'constant' : 'invalid'});
+      if (!valid) warn('invalid_operand', field, `invalid constant in ${field}.`);
+    });
+  }
+  for (const spec of definitionList) {
+    readField(instruction, spec, warn, (name, field) => {
+      if (isName(name)) definitions.push(name);
+      else warn('invalid_definition', field, 'invalid output identifier.');
+    });
+  }
+  return {index, opcode, raw: instruction, operands, definitions, known};
+}
+
+/** Decode inspected data flow under the pinned structural rules. */
+export function parse(text, maxBytes = limits.artifactBytes) {
+  checkArtifactSize(text.length, maxBytes);
+  checkArtifactSize(encoder.encode(text).length, maxBytes);
+  let raw;
+  try { raw = JSON.parse(text); }
+  catch { throw invalid('Invalid JSON. Choose a UTF-8 JSON .zkir artifact.'); }
+  if (!record(raw) || !record(raw.version) || !Number.isInteger(raw.version.major) ||
+      !Number.isInteger(raw.version.minor)) {
+    throw invalid('Invalid circuit. Expected an object with integer ZKIR major and minor versions.');
+  }
+
+  const version = `${raw.version.major}.${raw.version.minor}`;
+  if (!Object.hasOwn(schemas, version)) {
+    throw new ArtifactError('unsupported_version',
+      `Unsupported ZKIR version ${version}. Structural decoding supports 2.0, 3.0 and 3.1.`);
+  }
+  const hasSignature30 = version === '3.0' && Object.hasOwn(raw, 'outputs');
+  const schema = hasSignature30 ? signatureSchema30 : schemas[version];
+  const indexed = version === '2.0';
+  const hasOutputSignature = version === '3.1' || hasSignature30;
+  if (!Array.isArray(raw.instructions) || typeof raw.do_communications_commitment !== 'boolean' ||
+      (indexed ? !Number.isSafeInteger(raw.num_inputs) || raw.num_inputs < 0 :
+        !Array.isArray(raw.inputs) || (hasOutputSignature && !Array.isArray(raw.outputs)))) {
+    throw invalid(`Invalid ZKIR ${version} circuit. Check its signature, instructions and commitment flag.`);
+  }
+  if (raw.instructions.length > limits.instructions) throw exceeded('instruction count', limits.instructions);
+  const inputCount = indexed ? raw.num_inputs : raw.inputs.length;
+  if (inputCount > limits.signatureItems || (hasOutputSignature && raw.outputs.length > limits.signatureItems)) {
+    throw exceeded('signature item count', limits.signatureItems);
+  }
+  inspectJson(raw);
+  const inputs = indexed
+    ? Array.from({length: inputCount}, (_, index) => ({name: `input ${index}`}))
+    : raw.inputs;
+  const data = {...raw, inputs, outputs: hasOutputSignature ? raw.outputs : []};
+  const diagnostics = [], edges = [];
+  const diagnose = (code, message, instructionIndex, field) => diagnostics.push({
+    severity: 'warning', code, ...(instructionIndex === undefined ? {} : {instructionIndex}),
+    ...(field === undefined ? {} : {field}), message,
+  });
+  const envelope = new Set(['version', 'instructions', 'do_communications_commitment',
+    ...(indexed ? ['num_inputs'] : ['inputs']), ...(hasOutputSignature ? ['outputs'] : [])]);
+  for (const field of Object.keys(raw)) {
+    if (!envelope.has(field)) diagnose('unknown_field', 'Unrecognized artifact field.', undefined, field);
+  }
+
+  /** @type {Instruction[]} */
+  const instructions = data.instructions.map((instruction, index) => {
+    if (!record(instruction) || typeof instruction.op !== 'string' || !instruction.op.length) {
+      throw invalid(`Instruction ${index} has no opcode.`);
+    }
+    if (encoder.encode(JSON.stringify(instruction)).length > limits.instructionBytes) {
+      throw exceeded('serialized instruction size', limits.instructionBytes);
+    }
+    const fieldEntries = Object.values(instruction).reduce(
+      (total, value) => total + (Array.isArray(value) ? value.length : 1), 0);
+    if (fieldEntries > limits.entriesPerInstruction) {
+      throw exceeded('entries per instruction', limits.entriesPerInstruction);
+    }
+    return inspectInstruction(instruction, index, indexed, schema, diagnose);
+  });
+  const producers = new Map();
+  const memory = indexed ? inputs.map((_, index) => `input:${index}`) : [];
+  function define(name, producer, index) {
+    if (producers.has(name)) {
+      diagnose('duplicate_identifier', `duplicate identifier ${name}.`, index);
+      producers.set(name, null);
+    } else producers.set(name, producer);
+  }
+  if (!indexed) {
+    inputs.forEach((input, index) => {
+      if (!record(input) || !isName(input.name) || typeof input.type !== 'string') {
+        diagnose('invalid_input_signature', `Invalid typed input at index ${index}.`);
+        return;
+      }
+      define(input.name, `input:${input.name}`);
+    });
+    data.outputs.forEach((output, index) => {
+      if (typeof output !== 'string') diagnose('invalid_output_signature', `Invalid output type at index ${index}.`);
+    });
+    for (const {definitions, index} of instructions) {
+      for (const name of definitions) define(name, String(index), index);
+    }
+  }
+
+  let memoryAvailable = true;
+  let decodedInstructions = 0;
+  for (const instruction of instructions) {
+    const {index, opcode, known, operands, definitions} = instruction;
+    if (indexed && !known) memoryAvailable = false;
+    instruction.decoded = known && (!indexed || memoryAvailable);
+    if (!instruction.decoded) continue;
+    decodedInstructions++;
+    for (const operand of operands) {
+      const {kind, value, field, element} = operand;
+      if (kind === 'invalid' || kind === 'constant') continue;
+      const producer = indexed ? memory[value] : producers.get(value);
+      let issue;
+      if (producer === null) issue = ['ambiguous_identifier', `ambiguous identifier ${value} in ${field}.`];
+      else if (producer === undefined) issue = indexed
+        ? ['invalid_memory_index', `invalid memory index ${value} in ${field}.`]
+        : ['unresolved_identifier', `unresolved identifier ${value} in ${field}.`];
+      else if (!indexed && Number(producer) >= index) {
+        issue = ['forward_reference', `forward or self reference to ${value} in ${field}.`];
+      }
+      if (issue) {
+        operand.issue = issue[0];
+        diagnose(issue[0], issue[1], index, field);
+        continue;
+      }
+      operand.producer = producer;
+      edges.push({source: producer, target: String(index), label: indexed ? `${field}: [${value}]` : value,
+        field, ...(element === undefined ? {} : {element})});
+      if (edges.length > limits.edges) throw exceeded('dependency edge count', limits.edges);
+    }
+    if (indexed) {
+      for (let i = 0; i < schema.instructions[opcode][1]; i++) {
+        definitions.push(memory.length);
+        memory.push(String(index));
+      }
+    }
+  }
+
+  const warnings = diagnostics.map(({instructionIndex, field, message}) =>
+    `${instructionIndex === undefined ? '' : `Instruction ${instructionIndex}: `}${message}${field ? ` [${field}]` : ''}`);
+  const {instructions: _, ...provenance} = schema;
+  return {data, edges, warnings, diagnostics, instructions, hasOutputSignature, decoder: {
+    ...provenance, status: diagnostics.length ? 'partial' : 'complete',
+    decodedInstructions, totalInstructions: instructions.length,
+  }};
 }

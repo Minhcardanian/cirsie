@@ -1,0 +1,22 @@
+pragma language_version >= 0.28;
+import CompactStandardLibrary;
+
+export ledger decision: Field;
+export ledger branchTotal: Field;
+export ledger checksum: Field;
+
+export circuit update(a: Field, b: Field, c: Field, d: Field, chooseLeft: Boolean): [] {
+  const firstProduct = a * b;
+  const secondProduct = c * d;
+  const shared = firstProduct + secondProduct;
+
+  const left = shared * a + c;
+  const right = shared * d + b;
+  const cross = left * right;
+  const total = left + right;
+  const check = shared * shared + cross;
+
+  decision = disclose(chooseLeft ? left : right);
+  branchTotal = disclose(total);
+  checksum = disclose(check);
+}

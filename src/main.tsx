@@ -1,21 +1,247 @@
-import React, {useMemo,useState} from 'react';
+import {useMemo, useRef, useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import {ReactFlow, Background, Controls, type Node, type Edge} from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import {parse} from './parser.js';
+import {version} from '../package.json';
+import {analysisJson, analyzeArtifact, compareArtifacts, comparisonMarkdown} from './analysis.js';
+import {checkArtifactSize} from './parser.js';
 import './style.css';
-function Compare({baseline,candidate,onClose}:{baseline:any,candidate:any,onClose:()=>void}){
- const a=baseline.data.instructions,b=candidate.data.instructions; const count=(list:any[])=>list.reduce((m:Record<string,number>,x:any)=>(m[x.op]=(m[x.op]||0)+1,m),{}); const ac=count(a),bc=count(b); const ops=Array.from(new Set<string>([...Object.keys(ac),...Object.keys(bc)])).filter(op=>ac[op]!==bc[op]).sort(); const changes=Array.from({length:Math.max(a.length,b.length)},(_,i)=>({i,a:a[i],b:b[i]})).filter(x=>JSON.stringify(x.a)!==JSON.stringify(x.b));
- return <section className="comparison"><div className="comparetitle"><div><h3>Build comparison</h3><p>Baseline → candidate · instruction counts describe structure, not proof cost.</p></div><button onClick={onClose}>Close comparison</button></div><div className="metrics"><div><small>INSTRUCTIONS</small><b>{a.length} → {b.length}</b><span>{b.length-a.length>=0?'+':''}{b.length-a.length} change</span></div><div><small>ZKIR VERSION</small><b>{baseline.data.version.major}.{baseline.data.version.minor} → {candidate.data.version.major}.{candidate.data.version.minor}</b></div><div><small>POSITIONAL DIFFERENCES</small><b>{changes.length}</b><span>May include shifted instructions</span></div></div><h4>Opcode count changes</h4>{ops.length?<div className="opcounts">{ops.map(op=><div key={op}><code>{op}</code><span>{ac[op]||0} → {bc[op]||0}</span><b>{(bc[op]||0)-(ac[op]||0)>0?'+':''}{(bc[op]||0)-(ac[op]||0)}</b></div>)}</div>:<p>No opcode count changes.</p>}<details><summary>Inspect positional differences ({changes.length})</summary><p>Instructions are compared by position; insertions can shift later rows. Identifiers may change between compilations.</p>{changes.slice(0,100).map(({i,a,b})=><div className="diff" key={i}><b>#{i}</b><pre>{a?JSON.stringify(a,null,2):'—'}</pre><pre>{b?JSON.stringify(b,null,2):'—'}</pre></div>)}{changes.length>100&&<p>Showing first 100 differences.</p>}</details></section>
+
+type Analysis = Awaited<ReturnType<typeof analyzeArtifact>>;
+type Comparison = ReturnType<typeof compareArtifacts>;
+const pageSize = 200;
+const graphLimit = 40;
+
+function download(filename: string, body: string, type: string) {
+  const anchor = document.createElement('a');
+  anchor.href = URL.createObjectURL(new Blob([body], {type}));
+  anchor.download = filename;
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(anchor.href), 1000);
 }
-function App(){
- const [comparison,setComparison]=useState<any>(null),[compareError,setCompareError]=useState(''),[c,setC]=useState<any>(null),[error,setError]=useState(''),[selected,setSelected]=useState(0),[search,setSearch]=useState(''),[filter,setFilter]=useState('all');
- const instructions:any[]=c?.data.instructions??[];
- const ops=Array.from(new Set(instructions.map(x=>x.op))).sort();
- const filtered=instructions.map((x,i)=>({x,i})).filter(({x,i})=>(filter==='all'||x.op===filter)&&JSON.stringify(x).toLowerCase().includes(search.toLowerCase()));
- const graph=useMemo<{nodes: Node[],edges: Edge[]}>(()=>{if(!c)return {nodes:[] as Node[],edges:[] as Edge[]}; const id=String(selected); const relevant=c.edges.filter((e:any)=>e.source===id||e.target===id); const ids=new Set<string>([id,...relevant.flatMap((e:any)=>[e.source,e.target])]); const nodes=[...ids].map((n,i)=>({id:n,position:{x:n===id?400:relevant.some((e:any)=>e.source===n&&e.target===id)?60:740,y:n===id?180:(i%10)*85},data:{label:n.startsWith('input:')?'Input ['+n.slice(6)+']':`#${n}  ${c.data.instructions[Number(n)]?.op}`},style:{border:n===id?'2px solid #5d6df8':'1px solid #b8c4d8',borderRadius:10,padding:14}})); const edges=relevant.map((e:any,i:number)=>({...e,id:String(i),animated:true}));return {nodes,edges};},[c,selected]);
- async function loadExamples(){try {const [a,b]=await Promise.all([fetch(`${import.meta.env.BASE_URL}examples/baseline.zkir`).then(r=>r.text()),fetch(`${import.meta.env.BASE_URL}examples/changed.zkir`).then(r=>r.text())]);setC(parse(a));setComparison(parse(b));setSelected(0);setError('');setCompareError('');}catch(e){setError((e as Error).message)}}
- async function compare(file?:File){if(!file)return;try{setComparison(parse(await file.text()));setCompareError('')}catch(e){setComparison(null);setCompareError((e as Error).message)}}
- async function open(file?:File){if(!file)return;try{const parsed=parse(await file.text());setC(parsed);setComparison(null);setSelected(0);setError('');setFilter('all');setSearch('');}catch(e){setC(null);setError((e as Error).message)}}
- return <><header><div><b>◈ &nbsp;ZKIR Explorer</b><small>LEDGER 9 · LOCAL PREVIEW</small></div><div className="header-actions"><button className="sample" onClick={loadExamples}>Load example comparison</button><label className="upload">Open baseline .zkir<input type="file" accept=".zkir,application/json" onChange={e=>open(e.target.files?.[0])}/></label></div></header><div className="pipeline"><span>Compact source</span><i>→</i><strong>ZKIR explorer</strong><i>→</i><span>Circuit & keys</span><i>→</i><span>Proof</span><i>→</i><span>Verification</span><em>Conceptual pipeline · static artifact inspection</em></div>{error&&<div className="error" role="alert">{error}</div>}{!c?<main className="empty"><div className="symbol">◇</div><h1>Explore the circuit behind your contract.</h1><p>Open a text ZKIR 2.0 or 3.x artifact to inspect instructions and trace value dependencies. Your file stays on this device.</p><label className="upload primary">Choose a .zkir file<input type="file" accept=".zkir,application/json" onChange={e=>open(e.target.files?.[0])}/></label><button className="sample sample-empty" onClick={loadExamples}>Try the included example</button><p className="note">ZKIR 3.1 support is an experimental structural preview. This does not execute a circuit or show proof contents.</p></main>:<><div className="comparebar"><div><strong>Compare builds</strong><span> Load the same circuit from two builds to see instruction changes.</span></div><label className="compareupload">{comparison?'Replace candidate':'Open candidate .zkir'}<input type="file" accept=".zkir,application/json" onChange={e=>compare(e.target.files?.[0])}/></label></div>{compareError&&<div className="error">{compareError}</div>}{comparison&&<Compare baseline={c} candidate={comparison} onClose={()=>setComparison(null)}/>}<div className="meta"><b>{c.data.version.major}.{c.data.version.minor}</b> ZKIR VERSION <b>{instructions.length}</b> INSTRUCTIONS <b>{c.data.inputs.length}</b> INPUTS <b>{c.data.version.major === 2 ? '—' : c.data.outputs.length}</b> OUTPUT TYPES <span>Commitment: {c.data.do_communications_commitment?'enabled':'disabled'}</span></div>{c.warnings.length>0&&<details className="warning" open><summary>{c.warnings.length} warning(s) · graph may be incomplete</summary><ul>{c.warnings.slice(0,50).map((w:string,i:number)=><li key={i}>{w}</li>)}</ul></details>}<div className="layout"><aside><h3>Instructions <small>{filtered.length}</small></h3><input aria-label="Search instructions" placeholder="Search instructions…" value={search} onChange={e=>setSearch(e.target.value)}/><select aria-label="Filter opcode" value={filter} onChange={e=>setFilter(e.target.value)}><option value="all">All opcodes</option>{ops.map(o=><option key={o} value={o}>{o}</option>)}</select><div className="list">{filtered.map(({x,i})=><button className={selected===i?'active':''} key={i} onClick={()=>setSelected(i)}><span>{String(i).padStart(3,'0')}</span>{x.op}</button>)}</div></aside><section className="graph"><div className="graphhead"><h3>Dependency graph</h3><small>Inputs → selected instruction → consumers</small></div><ReactFlow key={selected} nodes={graph.nodes} edges={graph.edges} fitView nodesDraggable={false} onNodeClick={(_,node)=>{if(!node.id.startsWith('input:'))setSelected(Number(node.id))}}><Background/><Controls/></ReactFlow></section><aside className="detail"><h3>Instruction details</h3>{instructions[selected]?<><div className="badge">#{selected} · {instructions[selected].op}</div><p>Raw instruction</p><pre>{JSON.stringify(instructions[selected],null,2)}</pre></>:<p>No instructions in this circuit.</p>}<h4>Circuit signature</h4><pre>{JSON.stringify({inputs:c.data.inputs,outputs:c.data.outputs},null,2)}</pre></aside></div></>}</>
-}createRoot(document.getElementById('root')!).render(<App/>);
+
+function Compare({baseline, candidate, result, onClose}: {
+  baseline: Analysis; candidate: Analysis; result: Comparison; onClose: () => void;
+}) {
+  const {counts, fallback, changes, histogramDelta, coverage} = result;
+  return <section className="comparison">
+    <div className="comparetitle">
+      <div><h3>Build comparison</h3><p>{baseline.artifact.name} → {candidate.artifact.name}</p></div>
+      <div className="header-actions">
+        <button onClick={() => download('Circuit-comparison.md', comparisonMarkdown(baseline, candidate, result), 'text/markdown')}>
+          Export Markdown
+        </button>
+        <button onClick={onClose}>Close comparison</button>
+      </div>
+    </div>
+    <p>{fallback ? 'Positional fallback. Insertions can shift later instructions.' : 'Longest common subsequence of parsed JSON instructions.'}
+      {' '}Decoder coverage {coverage.baseline} → {coverage.candidate}.</p>
+    <div className="metrics">
+      <div><small>INSTRUCTIONS</small><b>{baseline.summary.instructions} → {candidate.summary.instructions}</b></div>
+      <div><small>ZKIR VERSION</small><b>{baseline.artifact.zkirVersion} → {candidate.artifact.zkirVersion}</b></div>
+      <div><small>MATCHED</small><b>{counts.matched}</b></div>
+      <div><small>ADDED / REMOVED</small><b>{counts.added} / {counts.removed}</b></div>
+      {fallback && <div><small>POSITIONAL DIFFERENCES</small><b>{counts.positionalDifferences}</b></div>}
+    </div>
+    <h4>Opcode count changes</h4>
+    {histogramDelta.length ? <div className="opcounts">{histogramDelta.slice(0, 100).map(({opcode, before, after, delta}) =>
+      <div key={opcode}><code>{opcode}</code><span>{before} → {after}</span><b>{delta > 0 ? '+' : ''}{delta}</b></div>
+    )}</div> : <p>No opcode count changes.</p>}
+    {histogramDelta.length > 100 && <p>Showing the first 100 opcode changes.</p>}
+    <details>
+      <summary>Inspect changes ({changes.length})</summary>
+      {changes.slice(0, 100).map(({beforeIndex, afterIndex}) => {
+        const before = beforeIndex === null ? undefined : baseline.instructions[beforeIndex].raw;
+        const after = afterIndex === null ? undefined : candidate.instructions[afterIndex].raw;
+        return <div className="diff" key={`${beforeIndex}:${afterIndex}`}>
+          <b>{beforeIndex === null ? 'Added' : `Baseline #${beforeIndex}`}
+            {afterIndex === null ? ' · Removed' : ` · Candidate #${afterIndex}`}</b>
+          <pre>{before ? JSON.stringify(before, null, 2) : '—'}</pre>
+          <pre>{after ? JSON.stringify(after, null, 2) : '—'}</pre>
+        </div>;
+      })}
+      {changes.length > 100 && <p>Showing the first 100 instruction differences.</p>}
+    </details>
+  </section>;
+}
+
+async function readFile(file: File) {
+  checkArtifactSize(file.size);
+  return analyzeArtifact(new Uint8Array(await file.arrayBuffer()), file.name, version);
+}
+
+async function readExample(name: string) {
+  const response = await fetch(`${import.meta.env.BASE_URL}examples/${name}`);
+  if (!response.ok) throw Error(`Could not load ${name}.`);
+  return analyzeArtifact(new Uint8Array(await response.arrayBuffer()), name, version);
+}
+
+function App() {
+  const [baseline, setBaseline] = useState<Analysis>();
+  const [candidate, setCandidate] = useState<Analysis>();
+  const [error, setError] = useState('');
+  const [compareError, setCompareError] = useState('');
+  const [selected, setSelected] = useState(0);
+  const [search, setSearch] = useState('');
+  const [filter, setFilter] = useState('');
+  const [page, setPage] = useState(0);
+  const baselineRequest = useRef(0), candidateRequest = useRef(0);
+
+  const result = useMemo(() => baseline && candidate ? compareArtifacts(baseline, candidate) : undefined,
+    [baseline, candidate]);
+  const searchIndex = useMemo(() => baseline?.instructions.map(row => ({
+    ...row, searchText: `${row.index} ${JSON.stringify(row.raw)}`.toLowerCase(),
+  })) ?? [], [baseline]);
+  const filtered = useMemo(() => {
+    const query = search.toLowerCase();
+    return searchIndex.filter(row => (!filter || row.opcode === filter) && row.searchText.includes(query));
+  }, [searchIndex, filter, search]);
+
+  const graph = useMemo(() => {
+    const nodes: Node[] = [], edges: Edge[] = [];
+    if (!baseline?.instructions[selected]) return {nodes, edges, omitted: 0};
+    const id = String(selected);
+    const incoming = baseline.edges.filter(edge => edge.target === id);
+    const outgoing = baseline.edges.filter(edge => edge.source === id);
+    const relevant = [...incoming.slice(0, graphLimit), ...outgoing.slice(0, graphLimit)];
+    const producers = new Set(incoming.map(edge => edge.source));
+    const ids = new Set([id, ...relevant.flatMap(edge => [edge.source, edge.target])]);
+    let left = 0, right = 0;
+    for (const nodeId of ids) {
+      const isSelected = nodeId === id;
+      const isProducer = producers.has(nodeId);
+      const input = nodeId.startsWith('input:');
+      nodes.push({
+        id: nodeId,
+        position: {x: isSelected ? 340 : isProducer ? 0 : 680, y: isSelected ? 0 : 70 * (isProducer ? left++ : right++)},
+        data: {label: input ? `Input ${nodeId.slice(6)}` : `#${nodeId} ${baseline.instructions[Number(nodeId)].opcode}`},
+      });
+    }
+    relevant.forEach((edge, index) => edges.push({...edge, id: String(index)}));
+    return {nodes, edges, omitted: incoming.length + outgoing.length - edges.length};
+  }, [baseline, selected]);
+
+  async function open(file?: File, examples = false) {
+    if (!file && !examples) return;
+    const request = ++baselineRequest.current;
+    setError('');
+    try {
+      const [next, reference] = file ? [await readFile(file), undefined]
+        : await Promise.all([readExample('baseline.zkir'), readExample('changed.zkir')]);
+      if (request !== baselineRequest.current) return;
+      candidateRequest.current++;
+      setBaseline(next);
+      setCandidate(reference);
+      setSelected(0);
+      setSearch('');
+      setFilter('');
+      setPage(0);
+      setCompareError('');
+    } catch (failure) {
+      if (request === baselineRequest.current) setError((failure as Error).message);
+    }
+  }
+
+  async function compare(file?: File) {
+    if (!file) return;
+    const request = ++candidateRequest.current;
+    setCompareError('');
+    try {
+      const next = await readFile(file);
+      if (request === candidateRequest.current) setCandidate(next);
+    } catch (failure) {
+      if (request === candidateRequest.current) setCompareError((failure as Error).message);
+    }
+  }
+
+  const current = baseline?.instructions[selected];
+  return <>
+    <header><div><b>Cirsie</b><small>ZKIR EXPLORER · WEB PREVIEW</small></div>
+      <div className="header-actions">
+        <button className="sample" onClick={() => open(undefined, true)}>Load example comparison</button>
+        <label className="upload">Open baseline .zkir <input type="file" accept=".zkir,application/json"
+          onChange={event => {void open(event.target.files?.[0]); event.target.value = '';}}/></label>
+      </div>
+    </header>
+    {error && <div className="error" role="alert">{error}</div>}
+    {!baseline ? <main className="empty">
+      <h1>Inspect a ZKIR circuit</h1>
+      <p>Open a local ZKIR 2.0, 3.0 or 3.1 artifact to inspect its instructions and trace dependencies.</p>
+    </main> : <>
+      <div className="comparebar">
+        <strong>{baseline.artifact.name}</strong>
+        <div className="header-actions">
+          <button onClick={() => download('Cirsie-analysis.json', analysisJson(baseline, candidate, result), 'application/json')}>
+            Export JSON
+          </button>
+          <label className="compareupload">{candidate ? 'Replace candidate' : 'Open candidate .zkir'}
+            <input type="file" accept=".zkir,application/json"
+              onChange={event => {void compare(event.target.files?.[0]); event.target.value = '';}}/>
+          </label>
+        </div>
+      </div>
+      {compareError && <div className="error" role="alert">{compareError}</div>}
+      {candidate && result && <Compare baseline={baseline} candidate={candidate} result={result} onClose={() => {
+        candidateRequest.current++;
+        setCandidate(undefined);
+      }}/>}
+      <div className="meta">
+        <span>ZKIR <b>{baseline.artifact.zkirVersion}</b></span>
+        <span><b>{baseline.summary.instructions}</b> instructions</span>
+        <span><b>{baseline.summary.inputs.length}</b> inputs</span>
+        <span>Commitment {baseline.summary.communicationsCommitment ? 'enabled' : 'disabled'}</span>
+        <span>Structural decode {baseline.decoder.status}</span>
+      </div>
+      {baseline.warnings.length > 0 && <details className="warning" open>
+        <summary>{baseline.warnings.length} diagnostics · partial structural decode</summary>
+        <ul>{baseline.warnings.slice(0, 50).map((warning, index) => <li key={index}>{warning}</li>)}</ul>
+        {baseline.warnings.length > 50 && <p>Showing the first 50 diagnostics. Export JSON for the complete list.</p>}
+      </details>}
+      <div className="layout">
+        <aside>
+          <h3>Instructions <small>{filtered.length}</small></h3>
+          <input aria-label="Search instructions" placeholder="Search instructions…" value={search}
+            onChange={event => {setSearch(event.target.value); setPage(0);}}/>
+          <select aria-label="Filter opcode" value={filter}
+            onChange={event => {setFilter(event.target.value); setPage(0);}}>
+            <option value="">All opcodes</option>
+            {baseline.summary.opcodes.slice(0, 500).map(({opcode}) => <option key={opcode}>{opcode}</option>)}
+          </select>
+          {baseline.summary.opcodes.length > 500 && <p>Showing the first 500 opcodes. Search for others by name.</p>}
+          {filtered.length > pageSize && <div className="comparetitle">
+            <button disabled={page === 0} onClick={() => setPage(page - 1)}>Previous</button>
+            <span>{page * pageSize + 1}–{Math.min((page + 1) * pageSize, filtered.length)}</span>
+            <button disabled={(page + 1) * pageSize >= filtered.length} onClick={() => setPage(page + 1)}>Next</button>
+          </div>}
+          <div className="list">{filtered.slice(page * pageSize, (page + 1) * pageSize).map(({opcode, index}) =>
+            <button aria-current={selected === index ? 'true' : undefined} className={selected === index ? 'active' : ''}
+              key={index} onClick={() => setSelected(index)}><span>{index}</span>{opcode}</button>)}</div>
+        </aside>
+        <section className="graph">
+          <div className="graphhead"><h3>Dependency graph</h3><small>
+            {graph.omitted ? `${graph.omitted} connections omitted from this view` : 'Inputs → selected instruction → consumers'}
+          </small></div>
+          <ReactFlow key={`${baseline.artifact.sha256}:${selected}`} nodes={graph.nodes} edges={graph.edges}
+            fitView nodesDraggable={false} onNodeClick={(_, node) => {
+              if (!node.id.startsWith('input:')) setSelected(Number(node.id));
+            }}><Background/><Controls/></ReactFlow>
+        </section>
+        <aside className="detail">
+          <h3>Instruction details</h3>
+          {current ? <><b>#{selected} · {current.opcode}</b><pre>{JSON.stringify(current.raw, null, 2)}</pre></>
+            : <p>No instructions in this circuit.</p>}
+          <details><summary>Artifact details</summary>
+            <pre>{JSON.stringify({...baseline.artifact, decoder: baseline.decoder.revision}, null, 2)}</pre>
+            <p>{baseline.summary.inputs.length} inputs. {baseline.summary.outputs?.length ?? 'Unknown number of'} output types.</p>
+            <pre>{JSON.stringify({inputs: baseline.summary.inputs.slice(0, 20),
+              outputs: baseline.summary.outputs?.slice(0, 20) ?? null}, null, 2)}</pre>
+            {(baseline.summary.inputs.length > 20 || (baseline.summary.outputs?.length ?? 0) > 20) &&
+              <p>Showing up to 20 items per signature. Export JSON for the full signature.</p>}
+          </details>
+        </aside>
+      </div>
+    </>}
+  </>;
+}
+
+createRoot(document.getElementById('root')!).render(<App/>);

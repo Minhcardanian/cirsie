@@ -1,29 +1,255 @@
-(function(){
- const vscode=acquireVsCodeApi();let circuit=null, selected=0;
- const $=id=>document.getElementById(id);
- const descriptions={add:'Adds two values in the circuit field.',mul:'Multiplies two values in the circuit field.',impact:'Declares a group of public input values, guarded by a condition. They can encode an Impact operation.',assert:'Requires its condition to hold.',constrain_eq:'Requires two values to be equal.',constrain_bits:'Restricts a value to the given number of bits.',public_input:'Reads a value from the public transcript.',private_input:'Reads a value from the private transcript.',output:'Includes a value in the circuit output.',load_imm:'Introduces a constant value.'};
- function label(id){if(id.startsWith('input:'))return 'Circuit input '+id.slice(6);const i=Number(id);return '#'+i+'  '+(circuit.instructions[i]?.op||'?');}
- function add(el,tag,text,cls){const n=document.createElement(tag);if(cls)n.className=cls;n.textContent=text;el.appendChild(n);return n;}
- function renderOperands(op){const panel=$('operands');panel.replaceChildren();const fields=circuit.operandFields?.[selected];if(!fields){add(panel,'p','Operand decoding is unavailable for this instruction. See the raw instruction.','muted');return;}let found=0;for(const field of fields){const raw=op[field];if(raw==null)continue;const values=Array.isArray(raw)?raw:[raw];values.forEach((v,i)=>{found++;const row=add(panel,'div','','operand');add(row,'span',field+(Array.isArray(raw)?'['+i+']':''),'operand-name');add(row,'code',String(v));add(row,'span',typeof v==='string' && /^-?0x[0-9a-f]+$/i.test(v)?'constant':'variable','operand-kind');});}if(!found)add(panel,'p','No operands.','muted');}
- function draw(){if(!circuit)return;vscode.setState({selected});const op=circuit.instructions[selected];if(!op)return;$('heading').textContent='#'+selected+'  '+op.op;$('explanation').textContent=descriptions[op.op]||'A ZKIR instruction. Inspect its operands and connected values below.';const expression=$('expression');if(['add','mul'].includes(op.op)&&op.output!=null&&op.a!=null&&op.b!=null){expression.hidden=false;expression.textContent=`${op.output} = ${op.a} ${op.op==='add'?'+':'×'} ${op.b}`;}else{expression.hidden=true;expression.textContent='';}$('raw').textContent=JSON.stringify(op,null,2);renderOperands(op);$('warning').textContent=circuit.warnings.length?'Dependency decoding may be incomplete. '+circuit.warnings.length+' warning(s) in the sidebar.':'';
- const incoming=circuit.edges.filter(e=>e.target===String(selected));const outgoing=circuit.edges.filter(e=>e.source===String(selected));const lanes=$('lanes');lanes.replaceChildren();const connectors=[];
- function lane(title,items,side){const col=add(lanes,'div','', 'lane');add(col,'h3',title);if(!items.length)add(col,'p',side==='in'?'No variable dependencies. Operands can still include constants.':'No decoded consumers.','muted');for(const edge of items.slice(0,40)){let id=side==='in'?edge.source:edge.target;let btn=add(col,'button',label(id),'node');add(btn,'small',(edge.field?edge.field+' · ':'')+(edge.label||'value'));connectors.push({button:btn,side});if(id.startsWith('input:'))btn.disabled=true;else btn.addEventListener('click',()=>{selected=Number(id);draw()});}if(items.length>40)add(col,'p',`Showing 40 of ${items.length} connections.`,'muted');}
- lane('INPUTS · '+incoming.length,incoming,'in');const center=add(lanes,'div','','lane center');add(center,'h3','SELECTED');const selectedNode=add(center,'div','#'+selected+'  '+op.op,'selected');lane('CONSUMERS · '+outgoing.length,outgoing,'out');$('counter').textContent=(selected+1)+' / '+circuit.instructions.length;$('previous').disabled=selected<=0;$('next').disabled=selected>=circuit.instructions.length-1; scheduleConnectors(lanes,selectedNode,connectors);
- }
- let repaint=()=>{};
- function scheduleConnectors(lanes,center,connections){
-   const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('class','connection-lines');svg.setAttribute('aria-hidden','true');lanes.prepend(svg);
-   repaint=()=>{if(!lanes.isConnected)return;svg.replaceChildren();const box=lanes.getBoundingClientRect(),middle=center.getBoundingClientRect();const vertical=window.innerWidth<=420;
-     for(const {button,side} of connections){const b=button.getBoundingClientRect();let x1,y1,x2,y2;
-       if(vertical){x1=(side==='in'?b.left+b.width/2:middle.left+middle.width/2)-box.left;y1=(side==='in'?b.bottom:middle.bottom)-box.top;x2=(side==='in'?middle.left+middle.width/2:b.left+b.width/2)-box.left;y2=(side==='in'?middle.top:b.top)-box.top;}
-       else{x1=(side==='in'?b.right:middle.right)-box.left;y1=(side==='in'?b.top+b.height/2:middle.top+middle.height/2)-box.top;x2=(side==='in'?middle.left:b.left)-box.left;y2=(side==='in'?middle.top+middle.height/2:b.top+b.height/2)-box.top;}
-       const line=document.createElementNS('http://www.w3.org/2000/svg','path');const bend=vertical?(y1+y2)/2:(x1+x2)/2;line.setAttribute('d',vertical?`M ${x1} ${y1} C ${x1} ${bend}, ${x2} ${bend}, ${x2} ${y2}`:`M ${x1} ${y1} C ${bend} ${y1}, ${bend} ${y2}, ${x2} ${y2}`);line.setAttribute('class','connection');svg.appendChild(line);
-     }
-   };(window.requestAnimationFrame||((fn)=>setTimeout(fn,0)))(repaint);
- }
- window.addEventListener('resize',()=>repaint());
- $('previous').onclick=()=>{selected--;draw()};$('next').onclick=()=>{selected++;draw()};$('search').addEventListener('input',()=>renderList());
- function renderList(){const list=$('list');list.replaceChildren();const query=$('search').value.toLowerCase();let count=0;for(let i=0;i<circuit.instructions.length;i++){const op=circuit.instructions[i];if(!(`${i} ${op.op} ${JSON.stringify(op)}`.toLowerCase().includes(query)))continue;if(count++>=200)break;const b=add(list,'button','#'+i+'  '+op.op,'listitem');b.onclick=()=>{selected=i;draw()};}if(count>200)add(list,'p','Showing the first 200 matches.','muted');}
- window.addEventListener('message',event=>{const msg=event.data;if(msg.type==='load'){circuit=msg.circuit;selected=Math.max(0,Math.min(msg.selected||0,circuit.instructions.length-1));$('file').textContent=msg.name+' · ZKIR '+circuit.version+' · '+circuit.instructions.length+' instructions';renderList();draw();}else if(msg.type==='select'){selected=Math.max(0,Math.min(msg.selected,circuit.instructions.length-1));draw();}});
- vscode.postMessage({type:'ready'});
+(function () {
+  const vscode = acquireVsCodeApi();
+  const $ = id => document.getElementById(id);
+  let circuit, selected = 0;
+  let searchIndex = [];
+  const incoming = new Map(), outgoing = new Map();
+  const visibleLimit = 40;
+
+  function label(id) {
+    if (id.startsWith('input:')) return 'Circuit input ' + id.slice(6);
+    return '#' + id + '  ' + circuit.instructions[Number(id)]?.raw.op;
+  }
+
+  function add(parent, tag, text, className) {
+    const node = document.createElement(tag);
+    node.textContent = text;
+    if (className) node.className = className;
+    parent.appendChild(node);
+    return node;
+  }
+
+  function select(index, focus = false) {
+    selected = Math.max(0, Math.min(index, circuit.instructions.length - 1));
+    draw();
+    if (focus) $('heading').focus();
+  }
+
+  function renderOperands(row) {
+    const panel = $('operands');
+    panel.replaceChildren();
+    if (row.operands.length) {
+      const table = add(panel, 'table', '', 'operand-table');
+      const headings = table.createTHead().insertRow();
+      for (const label of ['Field', 'Value', 'Kind']) add(headings, 'th', label).scope = 'col';
+      const body = table.createTBody();
+      for (const {field, element, value, kind, issue} of row.operands.slice(0, visibleLimit)) {
+        const line = body.insertRow();
+        add(line, 'td', element === undefined ? field : field + '[' + element + ']', 'operand-name');
+        add(line.insertCell(), 'code', typeof value === 'string' ? value : JSON.stringify(value));
+        const classification = add(line, 'td', (issue ?? kind).replaceAll('_', ' '), 'operand-kind');
+        if (issue) classification.dataset.issue = 'true';
+      }
+      if (row.operands.length > visibleLimit) {
+        add(panel, 'p', `Showing ${visibleLimit} of ${row.operands.length} operands. See Raw JSON for every field.`, 'muted');
+      }
+    } else {
+      add(panel, 'p', row.decoded ? 'No decoded operands.' : 'Operands unavailable. See Raw JSON.', 'muted');
+    }
+    const definitions = $('definitions');
+    definitions.replaceChildren();
+    definitions.hidden = !row.definitions?.length;
+    if (!definitions.hidden) {
+      add(definitions, 'h3', 'Defines');
+      for (const value of row.definitions.slice(0, visibleLimit)) add(definitions, 'code', String(value));
+      if (row.definitions.length > visibleLimit) {
+        add(definitions, 'p', `Showing ${visibleLimit} of ${row.definitions.length} definitions.`, 'muted');
+      }
+    }
+  }
+
+  function showRaw(raw) {
+    $('operand-view').hidden = raw;
+    $('raw-view').hidden = !raw;
+    $('show-operands').setAttribute('aria-pressed', String(!raw));
+    $('show-raw').setAttribute('aria-pressed', String(raw));
+  }
+
+  function draw() {
+    vscode.setState({selected});
+    vscode.postMessage({type: 'selected', index: selected});
+    const heading = $('heading'), lanes = $('lanes'), expression = $('expression');
+    const row = circuit.instructions[selected], op = row?.raw;
+    const total = circuit.instructions.length;
+    $('counter').textContent = total ? (selected + 1) + ' / ' + total : '0 / 0';
+    $('previous').disabled = selected <= 0;
+    $('next').disabled = selected >= total - 1;
+    $('warning').textContent = circuit.status === 'partial'
+      ? `${row?.partial ? 'Selected instruction has incomplete decoding. ' : ''}Partial structural decode. ${circuit.warningCount} diagnostics in the sidebar.`
+      : '';
+    $('warning').hidden = !$('warning').textContent;
+    $('raw').textContent = op ? JSON.stringify(op, null, 2) : '';
+    $('copy-status').textContent = '';
+    $('copy-raw').hidden = !op;
+    $('trace-board').hidden = !op;
+    $('inspector').hidden = !op;
+    $('explanation').textContent = '';
+    $('explanation').hidden = true;
+    expression.hidden = true;
+    expression.textContent = '';
+    lanes.replaceChildren();
+    repaint = () => {};
+    if (!op) {
+      heading.textContent = 'No instructions in this circuit';
+      $('operands').replaceChildren();
+      return;
+    }
+    heading.textContent = label(String(selected));
+    if (row.decoded && op.op === 'impact') {
+      $('explanation').hidden = false;
+      $('explanation').textContent = 'Declares a group of public input values guarded by a condition.';
+    }
+    if (row.decoded && !row.partial && ['add', 'mul'].includes(op.op) &&
+        [op.output, op.a, op.b].every(value => typeof value === 'string')) {
+      expression.hidden = false;
+      expression.textContent = `${op.output} = ${op.a} ${op.op === 'add' ? '+' : '×'} ${op.b}`;
+    }
+    renderOperands(row);
+    for (const button of $('list').querySelectorAll('button')) {
+      if (Number(button.dataset.index) === selected) button.setAttribute('aria-current', 'true');
+      else button.removeAttribute('aria-current');
+    }
+
+    const connections = [];
+    function lane(title, edges, side) {
+      const neighbors = new Map();
+      for (const edge of edges) {
+        const id = side === 'in' ? edge.source : edge.target;
+        if (!neighbors.has(id)) neighbors.set(id, []);
+        neighbors.get(id).push(edge);
+      }
+
+      const column = add(lanes, 'div', '', 'lane');
+      const heading = add(column, 'h3', title, 'lane-heading');
+      add(heading, 'span', String(neighbors.size), 'lane-count');
+      if (!neighbors.size) add(column, 'p', side === 'in' ? 'No producers' : 'No consumers', 'muted lane-empty');
+      let shown = 0;
+      for (const [id, links] of neighbors) {
+        if (shown++ === visibleLimit) break;
+        const isInput = id.startsWith('input:');
+        const node = add(column, isInput ? 'div' : 'button', label(id), 'node');
+        for (const edge of links.slice(0, visibleLimit)) {
+          const field = edge.element === undefined ? edge.field : `${edge.field}[${edge.element}]`;
+          add(node, 'small', field ? `${field} · ${edge.label}` : edge.label);
+        }
+        if (links.length > visibleLimit) add(node, 'small', `${links.length - visibleLimit} more operands`);
+        connections.push({button: node, side});
+        if (!isInput) node.onclick = () => select(Number(id), true);
+      }
+      if (neighbors.size > visibleLimit) {
+        add(column, 'p', `Showing ${visibleLimit} of ${neighbors.size} connected instructions.`, 'muted');
+      }
+    }
+
+    lane('Inputs', incoming.get(String(selected)) ?? [], 'in');
+    const center = add(lanes, 'div', '', 'lane center');
+    add(center, 'h3', 'Selected', 'lane-heading');
+    const selectedNode = add(center, 'div', label(String(selected)), 'selected');
+    lane('Consumers', outgoing.get(String(selected)) ?? [], 'out');
+    scheduleConnectors(lanes, selectedNode, connections);
+  }
+
+  let repaint = () => {};
+
+  function scheduleConnectors(lanes, center, connections) {
+    const svgNamespace = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(svgNamespace, 'svg');
+    const defs = document.createElementNS(svgNamespace, 'defs');
+    const arrow = document.createElementNS(svgNamespace, 'marker');
+    for (const [key, value] of Object.entries({id: 'edge-end', viewBox: '0 0 8 8', refX: '7', refY: '4',
+      markerWidth: '5', markerHeight: '5', orient: 'auto'})) arrow.setAttribute(key, value);
+    const tip = document.createElementNS(svgNamespace, 'path');
+    tip.setAttribute('d', 'M 0 0 L 8 4 L 0 8 z');
+    tip.setAttribute('class', 'edge-tip');
+    arrow.appendChild(tip);
+    defs.appendChild(arrow);
+    svg.appendChild(defs);
+    svg.setAttribute('class', 'connection-lines');
+    svg.setAttribute('aria-hidden', 'true');
+    lanes.prepend(svg);
+    repaint = () => {
+      if (!svg.isConnected) return;
+      svg.replaceChildren(defs);
+      const box = lanes.getBoundingClientRect();
+      const middle = center.getBoundingClientRect();
+      const vertical = window.innerWidth <= 450;
+      for (const {button, side} of connections) {
+        const linked = button.getBoundingClientRect();
+        const [from, to] = side === 'in' ? [linked, middle] : [middle, linked];
+        const x1 = (vertical ? from.left + from.width / 2 : from.right) - box.left;
+        const y1 = (vertical ? from.bottom : from.top + from.height / 2) - box.top;
+        const x2 = (vertical ? to.left + to.width / 2 : to.left) - box.left;
+        const y2 = (vertical ? to.top : to.top + to.height / 2) - box.top;
+        const midX = (x1 + x2) / 2, midY = (y1 + y2) / 2;
+        const control = vertical ? `${x1} ${midY} ${x2} ${midY}` : `${midX} ${y1} ${midX} ${y2}`;
+        const connector = document.createElementNS(svgNamespace, 'path');
+        connector.setAttribute('class', 'connection');
+        connector.setAttribute('marker-end', 'url(#edge-end)');
+        connector.setAttribute('d', `M ${x1} ${y1} C ${control} ${x2} ${y2}`);
+        svg.appendChild(connector);
+      }
+    };
+    window.requestAnimationFrame(repaint);
+  }
+
+  window.addEventListener('resize', () => repaint());
+  $('previous').onclick = () => select(selected - 1);
+  $('next').onclick = () => select(selected + 1);
+  $('search').addEventListener('input', renderList);
+  $('show-operands').onclick = () => showRaw(false);
+  $('show-raw').onclick = () => showRaw(true);
+  $('copy-raw').onclick = () => vscode.postMessage({type: 'copyRaw', index: selected});
+
+  function renderList() {
+    const list = $('list');
+    list.replaceChildren();
+    const query = $('search').value.toLowerCase();
+    let count = 0;
+    for (const [index, text] of searchIndex.entries()) {
+      if (!text.includes(query)) continue;
+      if (count++ >= 200) continue;
+      const row = circuit.instructions[index];
+      const button = add(list, 'button', '', 'listitem');
+      button.setAttribute('aria-label', `${label(String(index))}${row.partial ? ', partial decode' : ''}`);
+      button.dataset.index = String(index);
+      add(button, 'span', String(index), 'list-index');
+      add(button, 'span', row.raw.op);
+      if (row.partial) add(button, 'span', '!', 'list-warning').setAttribute('aria-hidden', 'true');
+      if (index === selected) button.setAttribute('aria-current', 'true');
+      button.onclick = () => select(index);
+    }
+    $('list-count').textContent = query ? `${count} / ${searchIndex.length}` : String(count);
+    if (count > 200) add(list, 'p', `Showing 200 of ${count}. Search to narrow the list.`, 'muted');
+    if (!count && query) add(list, 'p', 'No matching instructions.', 'muted');
+  }
+
+  window.addEventListener('message', ({data: message}) => {
+    if (message.type === 'load') {
+      circuit = message.circuit;
+      searchIndex = circuit.instructions.map(({raw}, index) => `${index} ${raw.op} ${JSON.stringify(raw)}`.toLowerCase());
+      incoming.clear();
+      outgoing.clear();
+      for (const edge of circuit.edges) {
+        for (const [connections, id] of [[incoming, edge.target], [outgoing, edge.source]]) {
+          if (!connections.has(id)) connections.set(id, []);
+          connections.get(id).push(edge);
+        }
+      }
+      $('search').disabled = false;
+      $('search').value = '';
+      $('file').textContent = message.name;
+      $('file').hidden = false;
+      $('artifact-meta').hidden = false;
+      $('version').textContent = `ZKIR ${circuit.version}`;
+      const status = $('decode-status');
+      status.textContent = circuit.status === 'partial' ? 'Partial decode' : 'Structural decode complete';
+      status.dataset.status = circuit.status;
+      renderList();
+      select(message.selected ?? 0);
+    } else if (message.type === 'select' && circuit) select(message.selected);
+    else if (message.type === 'copyResult' && message.index === selected) {
+      $('copy-status').textContent = message.ok ? 'Copied' : 'Could not copy. Select the JSON to copy it manually.';
+    }
+  });
+  vscode.postMessage({type: 'ready'});
 })();

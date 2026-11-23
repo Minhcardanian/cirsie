@@ -16,6 +16,7 @@ examples/build-b/
 # Small compiler-produced fixtures used by the extension and tests
 !public/examples/baseline.zkir
 !public/examples/changed.zkir
+!public/examples/branching.zkir
 
 # Local configuration, logs, and OS files
 .env
@@ -24,3 +25,5 @@ examples/build-b/
 *.log
 .DS_Store
 Thumbs.db
+!tests/fixtures/compact-0.31-zkir-2.0.zkir
+!tests/fixtures/compact-0.31-zkir-3.0.zkir

@@ -2,6 +2,10 @@
 !extension/**
 !src/parser.js
 !src/compare.js
-!public/examples/**
+!public/examples/baseline.zkir
+!public/examples/changed.zkir
+!public/examples/branching.zkir
 !README.md
 !package.json
+!src/schema.js
+!src/analysis.js
