@@ -1,0 +1,6 @@
+pragma language_version >= 0.21;
+import CompactStandardLibrary;
+export ledger value: Field;
+export circuit update(x: Field): [] {
+  value = disclose(x * x + 1);
+}

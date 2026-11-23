@@ -1,0 +1,26 @@
+# Dependencies and generated application bundles
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Packaged extension and local compiler output
+*.vsix
+examples/build-a/
+examples/build-b/
+*.bzkir
+*.prover
+*.verifier
+*.zkir
+
+# Small compiler-produced fixtures used by the extension and tests
+!public/examples/baseline.zkir
+!public/examples/changed.zkir
+
+# Local configuration, logs, and OS files
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+Thumbs.db

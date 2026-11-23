@@ -1,0 +1,3 @@
+import {test} from 'node:test';import {strict as assert} from 'node:assert';import {compareInstructions} from '../src/compare.js';
+test('insertion leaves later identical instructions aligned',()=>{const a=[{op:'add'},{op:'assert'}],b=[{op:'mul'},...a];const result=compareInstructions(a,b);assert.equal(result.method,'sequence');assert.deepEqual(result.changes,[{beforeIndex:null,afterIndex:0}]);});
+test('reports removal and handles large circuits with bounded memory',()=>{assert.deepEqual(compareInstructions([{op:'a'},{op:'b'}],[{op:'b'}]).changes,[{beforeIndex:0,afterIndex:null}]);assert.equal(compareInstructions([{op:'a'}],[{op:'b'}],1).method,'positional')});

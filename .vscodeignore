@@ -1,0 +1,7 @@
+**
+!extension/**
+!src/parser.js
+!src/compare.js
+!public/examples/**
+!README.md
+!package.json
