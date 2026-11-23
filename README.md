@@ -1,5 +1,7 @@
 # Cirsie · ZKIR Explorer for VS Code
 
+![Cirsie logo](extension/logo.png)
+
 Cirsie lets you inspect and compare Midnight circuit artifacts in VS Code. It reads the files locally and shows how values flow between instructions.
 
 ## What is ZKIR?

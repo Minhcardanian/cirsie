@@ -23,8 +23,13 @@
     "vite": "^7.0.0"
   },
   "displayName": "ZKIR Explorer",
+  "icon": "extension/logo.png",
   "description": "Inspect and compare Midnight ZKIR circuits locally.",
   "publisher": "local-zkir",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Minhcardanian/cirsie.git"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
